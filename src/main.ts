@@ -31,7 +31,7 @@ export default class RemoteBackup extends BasePlugin {
             multiple: true,
             combobox: true,
             defaultValue: [],
-            onPut: async () => await this.initLogsFetch()
+            onPut: async () => await sdk.deviceManager.requestRestart()
         },
         hostname: {
             title: 'Instance hostname',
