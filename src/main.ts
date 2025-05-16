@@ -4,9 +4,14 @@ import { Transport } from "syslog-client";
 import { BasePlugin, getBaseSettings } from '../../scrypted-apocaliss-base/src/basePlugin';
 import { Syslog } from "./syslog";
 import { getPluginConsole, parseLog, RemoteLogService, RemoteLogServiceEnum } from "./utils";
+import { Deferred } from "../../scrypted/common/src/deferred";
+import { createAsyncQueueFromGenerator } from '../../scrypted/common/src/async-queue';
 
 export default class RemoteBackup extends BasePlugin {
     logService: RemoteLogService;
+    stopSignalMap: Record<string, Deferred<void>> = {};
+    checkInterval: NodeJS.Timeout;
+    pluginLoggerId: Record<string, string> = {};
 
     storageSettings = new StorageSettings(this, {
         ...getBaseSettings({
@@ -79,6 +84,57 @@ export default class RemoteBackup extends BasePlugin {
         this.startStop(this.storageSettings.values.pluginEnabled).then().catch(logger.log);
     }
 
+    async stopCheckListener() {
+        this.checkInterval && clearInterval(this.checkInterval);
+        this.checkInterval = undefined;
+    }
+
+    // async startPluginsCheckListener() {
+    //     this.stopCheckListener();
+    //     const logger = this.getLogger();
+
+    //     const { plugins } = this.storageSettings.values;
+
+    //     for (const pluginDeviceId of plugins) {
+    //         const logger = await sdk.systemManager.getComponent('logger');
+    //         const deviceLogger = await logger.getLogger('device');
+    //         this.pluginLoggerId[pluginDeviceId] = await deviceLogger.getLogger(pluginDeviceId);
+
+    //         // const pluginDevice = sdk.systemManager.getDeviceById<ScryptedDeviceBase>(pluginDeviceId);
+    //         // sdk.systemManager.listen((deviceId, details, data) => {
+    //         //     if (pluginDeviceId === deviceId) {
+    //         //         logger.log(details, data);
+    //         //     }
+    //         // });
+
+    //         // const signal = this.stopSignalMap[pluginDeviceId];
+    //         // if (!signal || signal.finished) {
+    //         //     logger.log(`Plugin ${pluginDevice.pluginId} was kileld. Try restart`);
+    //         //     this.listenPluginLog(pluginDevice).catch(logger.log);
+    //         // }
+    //     }
+    // }
+
+    async startCheckListener() {
+        this.stopCheckListener();
+        const logger = this.getLogger();
+
+        this.checkInterval = setInterval(async () => {
+            const { plugins } = this.storageSettings.values;
+
+            for (const pluginDeviceId of plugins) {
+                const pluginDevice = sdk.systemManager.getDeviceById<ScryptedDeviceBase>(pluginDeviceId);
+
+                const signal = this.stopSignalMap[pluginDeviceId];
+                if (!signal || signal.finished) {
+                    logger.log(`Plugin ${pluginDevice.pluginId} was kileld. Try restart`);
+                    this.stopSignalMap[pluginDeviceId] = undefined;
+                    this.listenPluginLog(pluginDevice).catch(logger.log);
+                }
+            }
+        }, 2 * 1000);
+    }
+
     async startStop(enabled: boolean) {
         if (enabled) {
             await this.start();
@@ -95,6 +151,8 @@ export default class RemoteBackup extends BasePlugin {
         }
         await this.stop();
 
+        await this.startCheckListener();
+        // await this.startPluginsCheckListener();
         await this.initLogService();
         await this.initLogsFetch();
     }
@@ -121,9 +179,21 @@ export default class RemoteBackup extends BasePlugin {
     }
 
     async listenPluginLog(plugin: ScryptedDeviceBase) {
-        const remoteGenerator = await getPluginConsole({ pluginId: plugin.pluginId });
+        const { remoteGenerator } = await getPluginConsole({ pluginId: plugin.pluginId, onClosed: () => this.stopSignalMap[plugin.id].resolve() });
+        const logger = this.getLogger();
+        const signal = this.stopSignalMap[plugin.id];
+
+        if (signal) {
+            signal.resolve();
+        }
+
+        this.stopSignalMap[plugin.id] = new Deferred<void>();
+        logger.log(`Starting logs from ${plugin.pluginId}`);
+
         for await (const data of remoteGenerator) {
-            if (!data) {
+            const signal = this.stopSignalMap[plugin.id];
+            if (!data || signal.finished) {
+                logger.log('Plugin closed connection');
                 break;
             }
             const message = String(Buffer.from(data));
@@ -131,9 +201,10 @@ export default class RemoteBackup extends BasePlugin {
             this.logService?.push({
                 level: severity,
                 message: parsedMessage,
-                plugin: plugin.name.replaceAll(' ', '')
+                plugin: plugin.name.replaceAll(' ', ''),
+                timestamp: new Date()
             });
-            this.getLogger().debug(JSON.stringify({ message, severity, plugin: plugin.name, parsedMessage }));
+            logger.debug(JSON.stringify({ message, severity, plugin: plugin.name, parsedMessage }));
         }
     }
 
@@ -142,11 +213,9 @@ export default class RemoteBackup extends BasePlugin {
 
         try {
             const { plugins } = this.storageSettings.values;
-            logger.log(plugins);
 
             for (const pluginDeviceId of plugins) {
                 const pluginDevice = sdk.systemManager.getDeviceById<ScryptedDeviceBase>(pluginDeviceId);
-                logger.log(`Starting logs from ${pluginDevice.pluginId}`);
                 this.listenPluginLog(pluginDevice).catch(logger.log);
             }
         } catch (e) {

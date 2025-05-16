@@ -1,11 +1,13 @@
 import sdk, { DeviceProvider, StreamService } from "@scrypted/sdk";
 import { createAsyncQueue, createAsyncQueueFromGenerator } from '../../scrypted/common/src/async-queue';
+import net from 'net';
+import { once } from 'events';
 
 export interface RemoteLogService {
     console: Console;
 
     disconnect(): Promise<void>;
-    push(props: { level: LogLevel, plugin: string, message: string }): Promise<void>;
+    push(props: { level: LogLevel, plugin: string, message: string, timestamp: Date }): Promise<void>;
 }
 
 export enum RemoteLogServiceEnum {
@@ -21,11 +23,11 @@ export enum LogLevel {
 }
 
 export const getPluginConsole = async (props: {
-    pluginId: string
+    pluginId: string,
+    onClosed: () => void,
 }) => {
-    const { pluginId } = props;
+    const { pluginId, onClosed } = props;
 
-    let localQueue: ReturnType<typeof createAsyncQueueFromGenerator>;
     const dataQueue = createAsyncQueue<Buffer>();
     const hello = Buffer.from('undefined', 'utf8');
     dataQueue.enqueue(hello);
@@ -46,7 +48,7 @@ export const getPluginConsole = async (props: {
         }
     }
 
-    localQueue = createAsyncQueueFromGenerator(localGenerator());
+    const localQueue = createAsyncQueueFromGenerator(localGenerator());
 
     const plugin = sdk.systemManager.getDeviceByName<DeviceProvider>("@scrypted/core");
     const streamSvc = await plugin.getDevice('consoleservice') as StreamService<Buffer | string, Buffer>;
@@ -55,14 +57,20 @@ export const getPluginConsole = async (props: {
         pluginId
     });
 
-    return remoteGenerator;
-    // for await (const message of remoteGenerator) {
-    //     if (!message) {
-    //         break;
-    //     }
-    //     const b = Buffer.from(message);
-    //     console.log(String(b));
-    // }
+    const plugins = await sdk.systemManager.getComponent('plugins');
+    const servicePort = await plugins.getRemoteServicePort(pluginId, 'console') as number | [number, string];
+    const [port, host] = Array.isArray(servicePort) ? servicePort : [servicePort, undefined];
+
+    const socket = net.connect({
+        port,
+        host,
+    });
+    await once(socket, 'connect');
+
+    socket.on('close', onClosed);
+    // socket.on('end', () => queue.end());
+
+    return { remoteGenerator };
 }
 
 export const parseLog = (lineParent: string) => {

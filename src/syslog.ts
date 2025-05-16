@@ -30,10 +30,10 @@ export class Syslog implements RemoteLogService {
         }
     }
 
-    async push(props: { level: LogLevel; plugin: string; message: string; }) {
-        const { message, level, plugin } = props;
+    async push(props: { level: LogLevel, plugin: string, message: string, timestamp: Date }) {
+        const { message, level, plugin, timestamp } = props;
         const severity = severityMapping[level];
-        this.client.log(message, { severity, appName: plugin });
+        this.client.log(message, { severity, appName: plugin, timestamp });
     }
 
 }
